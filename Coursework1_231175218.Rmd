@@ -1,0 +1,170 @@
+---
+title: "MTH6139 Time Series" 
+subtitle: "NVDA Stock Price Analysis."
+author: "Jathavan Suthakar" 
+date: "March 2025" 
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: spacelab 
+    highlight: tango
+---
+ 
+```{r, echo=FALSE}
+# This code will display the QMUL logo at the top right of the page
+# Do not change this code
+htmltools::img(src = knitr::image_uri("images/QMlogo.png"),
+               alt = 'logo',
+               style = 'position:absolute; top:0; right:0; padding:10px; width:20%;')
+```
+
+# Introductory statement
+
+This project is intended to provide an insight into stock price data for the company Nvidia (NVDA), using data compiled by members on the internet. Using time series analysis with base R functionality, as well as Meta's Prophet model, I aim to model historical data in a way that allows us to forecast future stock prices.
+
+
+## Required dependencies.
+We need to load the dependencies required to perform the data analysis.
+```{r, message=FALSE, warning=FALSE}
+
+library(prophet)
+library(dplyr)
+```
+
+# Dataset introduction.
+
+Nvidia is a company that I have great interest in, having been a long time user of their GPUs and software since getting into PC technology in 2018. As such, I have chosen to analyse their stock prices over the years. This data should allow us to see the successes and failures that Nvidia has had throughout the years, alongside various other market developments, through a reflection in their stock price. Our dataset is taken from the website Kaggle, where data is compiled and uploaded by users.   
+
+## Data correction, part I.
+The Kaggle dataset contains daily data from the year 1999 to May 2024, but having a dataset this large would firstly have potential crashing issues when running Prophet, but secondly, and more importantly, it would cause the effect of recent changes in stock price to appear incorrectly. As such, we filter the dataset so that we can analyse from 2020 to 2024.
+
+## Data correction, part II.
+Further to this, the data is daily but we will take monthly averages for our time series. 
+
+Upon reviewing the dataset, I also noticed that the dataset, being not completely up-to-date, ends at 23/05/2024. To avoid skewing in May 2024, I clean the dataset so that we end on 30/04.
+
+Furthermore, having compared with Yahoo Finance figures for NVDA, I noticed that the Close price in the dataset was multiplied by a factor of 10, so I fix this in the code.
+
+MacOS automatically converted Kaggle data to the UK YYYY/MM/DD format when I was working on my laptop, so to avoid errors in R across devices I include a clause to check both formats of the date.
+
+```{r}
+
+nvda_raw <- read.csv("Nvidia Dataset.csv")
+
+nvda_monthly <- nvda_raw %>%
+  mutate(Date = as.Date(Date, tryFormats = c("%Y-%m-%d", "%d/%m/%Y"))) %>%
+  mutate(Close = Close / 10) %>%
+  filter(Date >= as.Date("2020-01-01") & Date <= as.Date("2024-04-30")) %>%
+  
+  mutate(Month = as.Date(format(Date, "%Y-%m-01"))) %>%
+  group_by(Month) %>%
+  summarise(Price = mean(Close, na.rm = TRUE))
+
+
+nvda_ts <- ts(nvda_monthly$Price, start = c(2020, 1), frequency = 12)
+
+summary(nvda_ts)
+```
+
+# Plot and Decomposition
+
+Before we use Prophet to forecast, we will test the time series and perform a classical decomposition to split the data into its underlying components ($X_t = m_t + S_t + Y_t$).
+
+```{r}
+
+plot(nvda_ts, 
+     main = "Average Monthly Closing Price of NVDA (2020-2024)", 
+     xlab = "Year", 
+     ylab = "Price (USD)", 
+     col = "darkgreen", 
+     lwd = 3)
+
+```
+
+As we can see, the stock had steady growth until 2022, where it dropped until the later months of the year. In 2024, the price surged, increasing above the $80 mark as the year progressed to May.
+
+We now decompose to gain a deeper insight.
+```{r}
+nvda_decomp <- decompose(nvda_ts, type = "additive")
+
+plot(nvda_decomp)
+```
+
+**Decomposition Insights:**
+
+- **Trend:** We can see that trend is relatively stable until 2023, where we can see the rise that we mentioned previously.
+
+- **Seasonal:** From the seasonal component, we can see that there is a regular pattern, where the stock price rises around halfway through the year, and dips near the end of the year. This may be attributable to Nvidia's announcement and release cycles.
+
+- **Random:** The random component shows heteroskedasticity, due to bigger jumps in share price in 2023 and 2024.
+
+# Prophet Analysis
+
+We now use Meta's Prophet model to perform further analysis and forecasting. We must first format our data into the `ds` and `y` columns that Prophet requires.
+
+```{r}
+
+prophet_df <- nvda_monthly %>%
+  rename(ds = Month, y = Price)
+```
+
+Our data is based off monthly average data, so we disable daily and weekly seasonality.
+```{r}
+nvda_prophet <- prophet(prophet_df, yearly.seasonality = TRUE, daily.seasonality = FALSE, weekly.seasonality = FALSE)
+```
+
+# Forecasting
+
+With the model fitted, we can forecast future values to predict how Nvidia's stock might behave over the next two years. Since the data only goes to 2024, we will use 48 months (4 years) as our forecasting period.
+
+```{r}
+
+nvda_forecast_df <- make_future_dataframe(nvda_prophet, periods = 48, freq = "month", include_history = TRUE)
+
+nvda_predictions <- predict(nvda_prophet, nvda_forecast_df)
+
+
+tail(nvda_predictions)
+```
+
+Now we plot, including our forecast data.
+
+```{r}
+
+plot(nvda_prophet, nvda_predictions, 
+     xlab = 'Year', 
+     ylab = 'Price (USD)',
+     main = 'Prophet Forecast for NVDA')
+```
+
+**Observations**
+
+- The **black** dots represent our actual historical monthly averages.
+
+- The **blue** line represents the model's predicted trend, which is showing that the growth continues.
+
+- The **light blue** shaded region represents the confidence intervals, which we can see widen as the years go on, suggesting that the stock price is quite uncertain.
+
+# Seasonality Analysis
+
+Prophet allows us to extract its own calculated components to compare against our classical decomposition.
+
+```{r, message=FALSE, warning=FALSE}
+
+prophet_plot_components(nvda_prophet, nvda_predictions)
+```
+
+**Insights:**
+
+**Trend Component:** The Prophet analysis confirms what we saw earlier, with the growth rate rising past 2023.
+
+**Yearly Seasonality:** The seasonality chart seems to be conflicting with what we found previously, where trend rises in March. Upon researching how Prophet calculates seasonality, I found that this harsh drop in March is most likely due to COVID-19, which started in March 2020. 
+
+- Since the pandemic caused a global economy crash, the extremely harsh NVDA stock price drop in that year causes the yearly seasonality to appear this way.
+
+# Final statements
+
+To conclude, we have seen Nvidia's success reflected in both our classical time series with decomposition and with Meta's Prophet model analysis.
+
+The Prophet model predicts that Nvidia's stock price will keep rising, but also shows that there is some uncertainty surrounding the price.
